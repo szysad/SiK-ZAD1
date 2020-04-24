@@ -22,12 +22,10 @@
 #define BUFFER_SIZE 8192
 #define ERR_MSG_SIZE 64
 #define ARGS 4
-#define SYNTAX_ERR -5
 #define LINE_PROC_FUN 3
 #define NO_MATCH 0
 #define MATCH 420
 #define NOT_READ_ENOUGHT 69
-#define SYSTEM_ERR -12
 #define END_OF_HEADER 15
 
 #define SP ' '
@@ -39,6 +37,7 @@
 static char ERR_MSG[ERR_MSG_SIZE];
 
 struct raport {
+    int code;
     int64_t real_content_len;
     char *cookies_exposition;
 };
@@ -54,6 +53,7 @@ struct header_d {
 typedef int (*proc_header_f)(char buffer[BUFFER_SIZE], struct header_d *data, int line_start, int line_end);
 
 void raport_print(struct raport raport) {
+    if (raport.code != 200) return;
     printf("Dlugosc zasobu: %ld\n", raport.real_content_len);
     if (raport.cookies_exposition)
         printf("%s\n", raport.cookies_exposition);
@@ -71,7 +71,7 @@ void set_err(char *msg) {
 
 void print_err() { fprintf(stderr, "ERROR: %s\n", ERR_MSG); }
 
-void header_d_init(struct header_d* data) { // DEBUG
+void header_d_init(struct header_d* data) {
     data->chunk_transfer_found = false;
     data->content_length_found = false;
     data->set_cookie = NULL;
@@ -94,9 +94,9 @@ int add_cookie(struct header_d *data, char buffer[BUFFER_SIZE], int start, int l
     char *newstrn = malloc(prev_len + len + 2);
     if (newstrn == NULL) RET_ERR(-1, "memory allocation fail");
 
-    strncpy(newstrn, data->set_cookie, prev_len);
+    memcpy(newstrn, data->set_cookie, prev_len);
     memset(newstrn + prev_len, NL, 1);
-    strncpy(newstrn + prev_len + 1, buffer + start, len);
+    memcpy(newstrn + prev_len + 1, buffer + start, len);
     memset(newstrn + prev_len + len + 1, 0, 1);
 
     free(data->set_cookie);
@@ -121,12 +121,12 @@ int proc_content_length_f(char buffer[BUFFER_SIZE], struct header_d *data, int l
     int pref_len = strlen(pref);
     if (strncasecmp(buffer + l_s, pref, pref_len)) return NO_MATCH;
     int i = pref_len + l_s;
-    if (skip_chars(buffer, OWS_CHARSET, &i, l_e)) RET_ERR(SYSTEM_ERR, "wrong header Content-Length field syntax");
-    if (data->content_length_found) RET_ERR(SYNTAX_ERR, "multpile Contelnt-Length header fields");
+    if (skip_chars(buffer, OWS_CHARSET, &i, l_e)) RET_ERR(-1, "wrong header Content-Length field syntax");
+    if (data->content_length_found) RET_ERR(-1, "multpile Contelnt-Length header fields");
     data->content_length_found = true;
     errno = 0;
     data->content_length = strtoll(buffer + i, NULL, 10);
-    if (errno) RET_ERR(SYNTAX_ERR, "wrong header Content-Length value");
+    if (errno) RET_ERR(-1, "wrong header Content-Length value");
     return MATCH;
 }
 
@@ -137,14 +137,15 @@ int proc_encoding_type_f(char buffer[BUFFER_SIZE], struct header_d *data, int l_
     int pref2_len = strlen(pref2);
     if (strncasecmp(buffer + l_s, pref1, pref1_len)) return NO_MATCH;
 
-    int last_numeric;
+    int last_numeric = -1;
     for (int i = l_s + pref1_len; i < l_e; i++) {
         if (strchr(", \t", buffer[i - 1]) && !strchr(", \t", buffer[i]))
             last_numeric = i;
     }
+    if (last_numeric == -1) RET_ERR(-1, "Transfer-Encoding empty")
     int ret = strncasecmp(buffer + last_numeric, pref2, pref2_len);
     if (!ret) {
-        if (data->chunk_transfer_found) RET_ERR(SYNTAX_ERR, "multiple Transfer-Encoding header fields");
+        if (data->chunk_transfer_found) RET_ERR(-1, "multiple Transfer-Encoding header fields");
         data->chunk_transfer_found = true;
         data->chunk_transfer = true;
         return MATCH;
@@ -158,12 +159,12 @@ int proc_setcookie_f(char buffer[BUFFER_SIZE], struct header_d *data, int l_s, i
     int pref_len = strlen(pref);
     if (strncasecmp(buffer + l_s, pref, pref_len)) return NO_MATCH;
     int i = pref_len + l_s;
-    if (skip_chars(buffer, OWS_CHARSET, &i, l_e)) RET_ERR(SYNTAX_ERR, "invalid Set-Cookie header field syntax");
+    if (skip_chars(buffer, OWS_CHARSET, &i, l_e)) RET_ERR(-1, "invalid Set-Cookie header field syntax");
     int cookie_s = i;
     char* semi = strchr(buffer + cookie_s, ';');
-    if (semi == NULL) RET_ERR(SYNTAX_ERR, "invalid Set-Cookie header field syntax");
+    if (semi == NULL) RET_ERR(-1, "invalid Set-Cookie header field syntax");
     int cookie_len = semi - (buffer + cookie_s);
-    if (add_cookie(data, buffer, cookie_s, cookie_len)) RET_ERR(SYSTEM_ERR, "memory allocation failed");
+    if (add_cookie(data, buffer, cookie_s, cookie_len)) RET_ERR(-1, "memory allocation failed");
     return 0;
 }
 
@@ -289,7 +290,7 @@ int process_request_line(char buffer[BUFFER_SIZE], int sockfd, int *l_line, int 
 
     while (!end) {
         r = read(sockfd, buffer + *l_read, BUFFER_SIZE - *l_read);
-        if (r < 0) RET_ERR(SYSTEM_ERR, "read fail req line");
+        if (r < 0) RET_ERR(-1, "read fail req line");
         if (r == 0) end = true;
         *l_read += r;
         tmp = buffer[*l_read + 1];
@@ -304,15 +305,15 @@ int process_request_line(char buffer[BUFFER_SIZE], int sockfd, int *l_line, int 
 
     char *p1 = "HTTP/";
     int p1_l = strlen(p1), code;
-    if (strncasecmp(buffer, p1, p1_l)) RET_ERR(SYSTEM_ERR, "invalid status line syntax");
-    if (buffer[p1_l] != '1') RET_ERR(SYSTEM_ERR, "wrong http version response");
-    if (buffer[p1_l + 1] != '.') RET_ERR(SYSTEM_ERR, "invalid status line syntax");
-    if (buffer[p1_l + 2] != '1') RET_ERR(SYSTEM_ERR, "invalid status line syntax");
-    if (buffer[p1_l + 3] != SP) RET_ERR(SYSTEM_ERR, "invalid status line syntax");
+    if (strncasecmp(buffer, p1, p1_l)) RET_ERR(-1, "invalid status line syntax");
+    if (buffer[p1_l] != '1') RET_ERR(-1, "wrong http version response");
+    if (buffer[p1_l + 1] != '.') RET_ERR(-1, "invalid status line syntax");
+    if (buffer[p1_l + 2] != '1') RET_ERR(-1, "invalid status line syntax");
+    if (buffer[p1_l + 3] != SP) RET_ERR(-1, "invalid status line syntax");
     errno = 0;
     code = strtol(buffer + p1_l + 4, NULL, 10);
-    if (errno) RET_ERR(SYSTEM_ERR, "invalid status line syntax");
-    if (buffer[p1_l + 7] != SP) RET_ERR(SYSTEM_ERR, "invalid status line syntax");
+    if (errno) RET_ERR(-1, "invalid status line syntax");
+    if (buffer[p1_l + 7] != SP) RET_ERR(-1, "invalid status line syntax");
     return code;
 }
 
@@ -342,7 +343,7 @@ int read_header_data(char buffer[BUFFER_SIZE], int sock, struct header_d *data, 
 
         do {
             r = proc_next_line(buffer, data, l_line, *l_read);
-            if (r < SYNTAX_ERR) return r;
+            if (r < 0) return r;
         } while (r != END_OF_HEADER && r != NOT_READ_ENOUGHT);
 
         if (r == END_OF_HEADER)
@@ -423,9 +424,6 @@ int read_body_chunked(char buffer[BUFFER_SIZE], int sockfd, int *l_start, int *l
             swap_buffer(buffer, l_start, l_read);
 
         errno = 0;
-        printf("id = 1, l = %d, r = %d\n", *l_start, *l_read);
-        fwrite(buffer + *l_start, 1, *l_read - *l_start, stdout); //DEBUG
-        printf("\n");
         chunk_s = strtoll(buffer + *l_start, NULL, 16);
         if (errno) RET_ERR(-1, "chunk size invalid");
 
@@ -440,9 +438,7 @@ int read_body_chunked(char buffer[BUFFER_SIZE], int sockfd, int *l_start, int *l
 
             push = push_past_next_CRLF(buffer, l_start, l_read);
             if (push < 0) RET_ERR(-1, "cant push past CRLF\n")
-            printf("id = 2, before l = %d, r = %d\n", *l_start, *l_read); //DEBUG
             push = read_until_CRLF(buffer, sockfd, l_start, l_read);
-            printf("after l = %d, r = %d\n", *l_start, *l_read); //DEBUG
             if (push < 0) RET_ERR(-1, "cant read next CRLF")
 
             if (*l_read > MUL_AND_DIV(BUFFER_SIZE, 3, 4))
@@ -450,9 +446,6 @@ int read_body_chunked(char buffer[BUFFER_SIZE], int sockfd, int *l_start, int *l
 
             errno = 0;
             chunk_s = strtoll(buffer + *l_start, NULL, 16);
-            printf("id = 3, l = %d, r = %d\n", *l_start, *l_read);
-            fwrite(buffer + *l_start, 1, *l_read - *l_start, stdout); //DEBUG
-            printf("\n");
             if (errno) RET_ERR (-1, "chunk size invalid");
 
             if (push_past_next_CRLF(buffer, l_start, l_read) < 0) RET_ERR(-1, "no next CRLF");
@@ -462,9 +455,7 @@ int read_body_chunked(char buffer[BUFFER_SIZE], int sockfd, int *l_start, int *l
         if (read_n_bytes(buffer, sockfd, chunk_s - *l_read + *l_start, l_start, l_read)) return -1;
         total_size += chunk_s;
 
-        printf("id = 4, before l = %d, r = %d\n", *l_start, *l_read); //DEBUG
         if (read_until_CRLF(buffer, sockfd, l_start, l_read) < 0) RET_ERR(-1, "no next CRLF")
-        printf("after l = %d, r = %d\n", *l_start, *l_read); //DEBUG
         push_past_next_CRLF(buffer, l_start, l_read);
     }
 
@@ -477,6 +468,7 @@ int process_response(char buffer[BUFFER_SIZE], int sockfd, struct raport *raport
     header_d_init(&data);
     code = process_request_line(buffer, sockfd, &l_line, &l_read);
     if (code < 0) return code;
+    raport->code = code;
     if (code != 200) {
         buffer[l_line - 2] = 0;
         fprintf(stdout, "%s\n", buffer);
@@ -553,8 +545,6 @@ int main(int argv, char *argc[]) {
         print_err();
         return 1;
     }
-
-
     if (send_to_sock(sock, buffer, total) < 0) {
         print_err();
         return 1;
