@@ -274,12 +274,11 @@ int build_request(char buffer[BUFFER_SIZE], char *cookiefn, char *testAddr) {
     if (netloc_end == NULL) RET_ERR(-1, "invalid testAddr\n")
     char tmp = *netloc_end;
     *netloc_end = 0;
-
     write_to_buff(buffer, &off, 3, "HOST: ", ss + 2, "\n");
     *netloc_end = tmp;
-    write_to_buff(buffer, &off, 1, "CONNECTION: CLOSE\n\n");
     r = read_write_cookiesf(buffer, &off, cookiefn);
     if (r < 0) return r;
+    write_to_buff(buffer, &off, 1, "CONNECTION: CLOSE\r\n\r\n");
     return off;
 }
 
@@ -509,8 +508,9 @@ int set_up_conn(char *addr, char *port) {
     int rc = getaddrinfo(addr, port, &addr_hints, &addr_result);
     if (rc != 0) RET_ERR(-1, "ERROR: getaddrinfo fail");
 
-    if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) != 0) RET_ERR(-1, "connect fail")
+    rc = connect(sock, addr_result->ai_addr, addr_result->ai_addrlen);
     freeaddrinfo(addr_result);
+    if (rc) RET_ERR(-1, "connect fail");
 
     return sock;
 }
